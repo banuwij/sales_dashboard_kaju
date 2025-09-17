@@ -4,47 +4,30 @@ import numpy as np
 import altair as alt
 from io import BytesIO
 
-# ------------------------------
-# Helper functions
-# ------------------------------
-
-def read_csv_flexible(uploaded_file_or_path):
-    """Read CSV from file uploader or local path."""
-    if uploaded_file_or_path is None:
-        return None
-    try:
-        if isinstance(uploaded_file_or_path, str):
-            return pd.read_csv(uploaded_file_or_path)
-        else:
-            return pd.read_csv(uploaded_file_or_path)
-    except Exception as e:
-        st.error(f"Gagal membaca CSV: {e}")
-        return None
-
-
+# ==============================
+# Helpers
+# ==============================
 def to_numeric_rupiah(s):
+    """Convert 'Rp239.000' / '-Rp199.000' / '239,000' → float. Keep NaN if not parseable."""
     if pd.isna(s):
         return np.nan
     if isinstance(s, (int, float, np.number)):
         return float(s)
     s = str(s)
-    # Standardize negatives like "-Rp199.000" or "-199,000"
     negative = s.strip().startswith("-")
     s = s.replace("-", "").replace("Rp", "").replace(" ", "")
     s = s.replace(".", "").replace(",", ".")
     try:
         val = float(s) if s != "" else np.nan
         return -val if negative else val
-    except:
+    except Exception:
         return np.nan
 
-
-def clean_september_df(df):
-    # Try to standardize column names
+def clean_september_df(df: pd.DataFrame) -> pd.DataFrame:
     df = df.copy()
     df.columns = [c.strip() for c in df.columns]
 
-    # Rename common columns if found
+    # Normalisasi nama kolom umum
     rename_map = {
         'Unnamed: 0': 'Produk',
         'Stock Keluar': 'Stock Keluar',
@@ -55,7 +38,7 @@ def clean_september_df(df):
     }
     df = df.rename(columns=rename_map)
 
-    # Ensure numeric columns
+    # Pastikan numerik
     for col in ['Stock Keluar', 'Stock Masuk', 'Stock Akhir']:
         if col in df.columns:
             df[col] = pd.to_numeric(df[col], errors='coerce').fillna(0)
@@ -65,42 +48,48 @@ def clean_september_df(df):
 
     if 'Value Total' in df.columns:
         df['Value Num'] = df['Value Total'].apply(to_numeric_rupiah)
-    else:
-        # If not present, compute approx value = Stock Keluar * Harga Num (if available)
-        if 'Harga Num' in df.columns:
-            df['Value Num'] = df['Stock Keluar'] * df['Harga Num']
+    elif 'Harga Num' in df.columns:
+        # Estimasi kalau tidak ada Value Total
+        df['Value Num'] = df['Stock Keluar'] * df['Harga Num']
 
-    # Product name fallback
+    # Nama produk fallback
     if 'Produk' not in df.columns:
-        # try to find first object column as product name
         object_cols = [c for c in df.columns if df[c].dtype == 'object']
-        if object_cols:
-            df['Produk'] = df[object_cols[0]]
-        else:
-            df['Produk'] = np.arange(len(df))
+        df['Produk'] = df[object_cols[0]] if object_cols else np.arange(len(df))
 
     return df
 
+def fmt_rp(x):
+    try:
+        x = float(x)
+        return 'Rp' + f"{int(round(x)): ,}".replace(',', '.')
+    except Exception:
+        return x
 
-def make_bar_chart(df, x_col, y_col, title, tooltip=None, top_n=10, sort_desc=True, format_x=None):
+def make_bar(df, x_col, y_col, title, color="#2563EB", top_n=10, x_format=","):
     if df.empty:
         return alt.Chart(pd.DataFrame({x_col: [], y_col: []})).mark_bar()
-    temp = df[[x_col, y_col]].dropna().copy()
-    temp = temp.groupby(x_col, as_index=False)[y_col].sum()
-    temp = temp.sort_values(y_col, ascending=not sort_desc).head(top_n)
-
+    tmp = (
+        df[[x_col, y_col]]
+        .dropna()
+        .groupby(x_col, as_index=False)[y_col]
+        .sum()
+        .sort_values(y_col, ascending=False)
+        .head(top_n)
+    )
     chart = (
-        alt.Chart(temp)
-        .mark_bar()
+        alt.Chart(tmp).properties(background='white')
+        .mark_bar(color=color)
         .encode(
-            x=alt.X(f'{y_col}:Q', title=y_col, axis=alt.Axis(format=format_x) if format_x else alt.Axis()),
-            y=alt.Y(f'{x_col}:N', sort='-x', title='Produk'),
-            tooltip=tooltip or [x_col, y_col],
+            x=alt.X(f"{y_col}:Q", axis=alt.Axis(format=x_format, labelColor="#111827", titleColor="#111827", gridColor="#E5E7EB"), title=y_col),
+            y=alt.Y(f"{x_col}:N", sort='-x', title='Produk', axis=alt.Axis(labelColor="#111827", titleColor="#111827")),
+            tooltip=[x_col, alt.Tooltip(f"{y_col}:Q", format=",")],
         )
         .properties(title=title, height=420)
+        .configure_title(color="#111827")
+        .configure_view(strokeOpacity=0)
     )
     return chart
-
 
 def df_to_excel_download(df, filename='cleaned_september.xlsx'):
     output = BytesIO()
@@ -110,165 +99,184 @@ def df_to_excel_download(df, filename='cleaned_september.xlsx'):
             df.to_excel(writer, index=False, sheet_name='September')
         return output.getvalue(), filename
     except Exception:
-        # Fallback to CSV bytes
         return df.to_csv(index=False).encode('utf-8'), filename.replace('.xlsx', '.csv')
 
+# ==============================
+# UI & THEME
+# ==============================
+st.set_page_config(page_title='Kajuaruna Dashboard', layout='wide')
 
-# ------------------------------
-# UI
-# ------------------------------
-st.set_page_config(page_title='September 2025 Sales Dashboard', layout='wide')
+# Inject CSS — dibungkus string agar tidak bikin SyntaxError
+CSS = """
+<style>
+  html, body, [data-testid="stAppViewContainer"] { background-color: #f7f7f8 !important; }
+  [data-testid="stHeader"] { background: transparent !important; }
+  section[data-testid="stSidebar"] { background-color: #ffffff !important; }
+  div.block-container { padding-top: 1.5rem; }
 
-st.title('September 2025 Sales Dashboard')
+  h1, h2, h3, h4, h5, p, ul, li { color: #111827 !important; font-family: 'Helvetica Neue', Arial, sans-serif; }
 
-st.markdown(
-    """
-    Upload **file September 2025** (format seperti: *So - So September 2025.csv*). App ini akan:
-    - Menampilkan **Top Penjualan (Stock Keluar)**
-    - **Produk dengan Value tertinggi** dan **produk minus**
-    - Tabel ringkasan dan opsi unduh data yang sudah dibersihkan
-    """
-)
+  /* KPI text */
+  div[data-testid="stMetricValue"], div[data-testid="stMetricLabel"] { color: #111827 !important; }
 
-# Default path (opsional, untuk lokal). Kosongkan jika pakai uploader.
-DEFAULT_LOCAL_PATH = ''  # contoh: 'So - So September 2025.csv'
+  /* Download button — teks & ikon putih */
+  [data-testid="stDownloadButton"] > button {
+      background-color: #111827 !important;
+      color: #ffffff !important;
+      border: 1px solid #111827;
+      border-radius: 10px; padding: 10px 16px; font-weight: 600;
+  }
+  [data-testid="stDownloadButton"] > button * { color: #ffffff !important; fill: #ffffff !important; }
+  [data-testid="stDownloadButton"] > button:hover { filter: brightness(1.08); }
 
-col_up1, col_up2 = st.columns([2,1])
-with col_up1:
-    up = st.file_uploader('Upload CSV September 2025', type=['csv'])
-with col_up2:
-    st.write('\n')
-    use_default = st.checkbox('Pakai path lokal (developer)', value=False)
-    local_path = st.text_input('Path lokal', value=DEFAULT_LOCAL_PATH)
+  /* DataFrame cards */
+  [data-testid="stDataFrame"] { background: #ffffff !important; border: 1px solid #E5E7EB; border-radius: 12px; padding: 6px; }
+</style>
+"""
+st.markdown(CSS, unsafe_allow_html=True)
 
-if (up is None) and not (use_default and local_path):
-    st.info('⬆️ Silakan upload file September 2025 terlebih dahulu, atau isi path lokal lalu centang opsi.')
+# Palette
+STK_COLOR = "#10B981"   # green (stock keluar)
+VAL_COLOR = "#2563EB"   # blue (value)
+MINUS_COLOR = "#EF4444" # red (minus)
+
+# Header + logo
+col_logo, col_title = st.columns([1, 5])
+with col_logo:
+    try:
+        st.image('IMG_5681.PNG', width=110)
+    except Exception:
+        st.write('Kajuaruna')
+with col_title:
+    st.title('Kajuaruna Dashboard')
+    st.caption('Powered by Wijaya & Brothers')
+
+st.markdown("""
+Upload **file yang akan di olah** (mis. *So - So September 2025.csv*). App ini menampilkan:
+
+- **Top Penjualan (Stock Keluar)**
+- **Produk dengan Value tertinggi** & **produk minus**
+- **Produk tidak keluar** dan **tabel ringkasan** + unduhan data bersih
+""")
+
+# ==============================
+# Upload CSV (tanpa path lokal)
+# ==============================
+up = st.file_uploader('Upload CSV September 2025', type=['csv'])
+if up is None:
+    st.info('⬆️ Silakan upload file terlebih dahulu.')
     st.stop()
 
-# Load data
-_df = read_csv_flexible(local_path if (use_default and local_path) else up)
-if _df is None or _df.empty:
-    st.error('Data kosong / tidak terbaca.')
+try:
+    raw_df = pd.read_csv(up)
+except Exception as e:
+    st.error(f'Gagal membaca CSV: {e}')
     st.stop()
 
-# Clean
-sep_df = clean_september_df(_df)
+# Clean data
+sep_df = clean_september_df(raw_df)
 
-# Sidebar controls
+# ==============================
+# Sidebar Controls
+# ==============================
 st.sidebar.header('Filter & Opsi')
-TOP_N = st.sidebar.slider('Top N', min_value=5, max_value=30, value=10, step=1)
-show_tables = st.sidebar.checkbox('Tampilkan tabel detail', value=True)
+TOP_N = st.sidebar.slider('Top N', 5, 30, 10, 1)
+st.sidebar.checkbox('Tampilkan tabel detail', value=True, key='show_tables')
 
-# KPI Row
-kpi1, kpi2, kpi3, kpi4 = st.columns(4)
-with kpi1:
-    total_keluar = float(sep_df.get('Stock Keluar', pd.Series([0])).sum())
-    st.metric('Total Stock Keluar', f"{int(total_keluar):,}")
-with kpi2:
-    total_masuk = float(sep_df.get('Stock Masuk', pd.Series([0])).sum())
-    st.metric('Total Stock Masuk', f"{int(total_masuk):,}")
-with kpi3:
-    total_value = float(sep_df.get('Value Num', pd.Series([0])).sum())
-    st.metric('Total Value (Rp)', f"Rp {int(total_value):,}")
-with kpi4:
+# ==============================
+# KPI
+# ==============================
+k1, k2, k3, k4 = st.columns(4)
+with k1:
+    st.metric('Total Stock Keluar', f"{int(sep_df.get('Stock Keluar', pd.Series([0])).sum()):,}".replace(',', '.'))
+with k2:
+    st.metric('Total Stock Masuk', f"{int(sep_df.get('Stock Masuk', pd.Series([0])).sum()):,}".replace(',', '.'))
+with k3:
+    st.metric('Total Value (Rp)', fmt_rp(sep_df.get('Value Num', pd.Series([0])).sum()))
+with k4:
     minus_count = int((sep_df.get('Value Num', pd.Series([np.nan])).fillna(0) < 0).sum())
     st.metric('Jumlah Produk Minus', f"{minus_count}")
 
-# Charts Row 1: Top Stock Keluar & Top Value
+# ==============================
+# Charts: Top Keluar & Top Value
+# ==============================
 c1, c2 = st.columns(2)
 with c1:
-    chart_keluar = make_bar_chart(
-        sep_df, 'Produk', 'Stock Keluar',
-        title=f'Top {TOP_N} Stock Keluar - September 2025',
-        tooltip=['Produk', 'Stock Keluar'],
-        top_n=TOP_N,
-        sort_desc=True,
+    st.altair_chart(
+        make_bar(sep_df, 'Produk', 'Stock Keluar', f'Top {TOP_N} Stock Keluar - September 2025', color=STK_COLOR, top_n=TOP_N, x_format=","),
+        use_container_width=True
     )
-    st.altair_chart(chart_keluar, use_container_width=True)
-
 with c2:
-    chart_value = make_bar_chart(
-        sep_df, 'Produk', 'Value Num',
-        title=f'Top {TOP_N} Value (Rp) - September 2025',
-        tooltip=['Produk', alt.Tooltip('Value Num:Q', format=',')],
-        top_n=TOP_N,
-        sort_desc=True,
-        format_x=",")
-    st.altair_chart(chart_value, use_container_width=True)
+    st.altair_chart(
+        make_bar(sep_df, 'Produk', 'Value Num', f'Top {TOP_N} Value (Rp) - September 2025', color=VAL_COLOR, top_n=TOP_N, x_format=","),
+        use_container_width=True
+    )
 
-# Charts Row 2: Produk Minus & Zero-Keluar
+# ==============================
+# Minus Analysis & Zero Movers
+# ==============================
 m1, m2 = st.columns(2)
 with m1:
     minus_df = sep_df[sep_df['Value Num'].fillna(0) < 0][['Produk', 'Value Num']].sort_values('Value Num')
     if minus_df.empty:
-        st.success('Tidak ada produk minus berdasarkan Value Num.')
+        st.success('Tidak ada produk minus berdasarkan Value.')
     else:
+        # Chart minus (merah)
         minus_chart = (
-            alt.Chart(minus_df.head(TOP_N))
-            .mark_bar()
-            .encode(x=alt.X('Value Num:Q', title='Value (Rp)', axis=alt.Axis(format=",")),
-                    y=alt.Y('Produk:N', sort='-x', title='Produk'),
-                    tooltip=['Produk', alt.Tooltip('Value Num:Q', format=',')])
+            alt.Chart(minus_df.head(TOP_N)).properties(background='white')
+            .mark_bar(color=MINUS_COLOR)
+            .encode(
+                x=alt.X('Value Num:Q', title='Value (Rp)', axis=alt.Axis(format=",", labelColor="#111827", titleColor="#111827", gridColor="#E5E7EB")),
+                y=alt.Y('Produk:N', sort='-x', title='Produk', axis=alt.Axis(labelColor="#111827", titleColor="#111827")),
+                tooltip=['Produk', alt.Tooltip('Value Num:Q', format=',')]
+            )
             .properties(title=f'Bottom {min(TOP_N, len(minus_df))} Produk (Value Minus)')
+            .configure_title(color="#111827")
+            .configure_view(strokeOpacity=0)
         )
         st.altair_chart(minus_chart, use_container_width=True)
 
-        # Analisa produk minus
-        st.markdown("### Analisa Produk Minus")
-        st.write(f"Total produk minus: **{len(minus_df)}**")
-        st.write("Produk minus biasanya muncul karena:")
-        st.markdown("- Stok keluar lebih besar dari stok masuk (oversold)")
-        st.markdown("- Kesalahan input data stock atau value")
-        st.markdown("- Refund/retur yang belum tercatat di stok masuk")
-        st.write("Top produk minus:")
-        # Format Value Num jadi Rupiah
-minus_df_fmt = minus_df.copy()
-minus_df_fmt['Value (Rp)'] = minus_df_fmt['Value Num'].apply(lambda x: 'Rp' + f"{int(x):,}".replace(',', '.') if pd.notna(x) else x)
-st.dataframe(minus_df_fmt[['Produk','Value (Rp)']].head(min(10, len(minus_df_fmt))))
+        st.markdown('### Analisa Produk Minus')
+        st.write(f'Total produk minus: **{len(minus_df)}**')
+        st.markdown('- Stok keluar melebihi stok masuk (oversold)')
+        st.markdown('- Kesalahan input data stok atau harga/value')
+        st.markdown('- Refund/retur belum dibukukan ke stok masuk')
+
+        minus_df_fmt = minus_df.copy()
+        minus_df_fmt['Value (Rp)'] = minus_df_fmt['Value Num'].apply(fmt_rp)
+        st.dataframe(minus_df_fmt[['Produk', 'Value (Rp)']].head(min(2000, len(minus_df_fmt))), height=360, use_container_width=True, hide_index=True)
 
 with m2:
-    zero_keluar = sep_df[sep_df['Stock Keluar'] == 0][['Produk']]
+    zero_df = sep_df[sep_df['Stock Keluar'] == 0][['Produk']]
     st.subheader('Produk Tidak Keluar (Stock Keluar = 0)')
-    st.write(f"Jumlah: **{len(zero_keluar)}** produk")
-    if show_tables and not zero_keluar.empty:
-        st.dataframe(zero_keluar)
+    st.write(f'Jumlah: **{len(zero_df)}** produk')
+    if len(zero_df):
+        st.dataframe(zero_df.rename(columns={'Produk': 'Produk'}), height=360, use_container_width=True, hide_index=True)
 
-# Tables Section
-if show_tables:
-    st.markdown('---')
-    st.subheader('Tabel Ringkasan (bersih)')
-
-    def fmt_rp(x):
+# ==============================
+# Tabel Ringkasan (bersih) — tanpa kolom Value
+# ==============================
+st.markdown('---')
+st.subheader('Tabel Ringkasan (bersih)')
+base_cols = [c for c in ['Produk', 'Stock Keluar', 'Stock Masuk', 'Stock Akhir'] if c in sep_df.columns]
+view_df = sep_df.copy()
+if 'Harga Num' in view_df.columns:
+    view_df['Harga (Rp)'] = view_df['Harga Num'].apply(fmt_rp)
+cols_show = base_cols + (['Harga (Rp)'] if 'Harga (Rp)' in view_df.columns else [])
+# format angka stok untuk tampilan
+_disp = view_df[cols_show].copy()
+for _c in ['Stock Keluar', 'Stock Masuk', 'Stock Akhir']:
+    if _c in _disp.columns:
         try:
-            x = float(x)
-            return 'Rp' + f"{int(x):,}".replace(',', '.')
+            _disp[_c] = _disp[_c].astype(float).round(0).astype(int).map(lambda v: f"{v:,}".replace(',', '.'))
         except Exception:
-            return x
+            pass
+st.dataframe(_disp.sort_values('Stock Keluar', ascending=False), height=520, use_container_width=True, hide_index=True)
 
-    # Pilih kolom yang relevan
-    cols_base = [c for c in ['Produk', 'Stock Keluar', 'Stock Masuk', 'Stock Akhir'] if c in sep_df.columns]
-    cols_money = [c for c in ['Harga Num', 'Value Total', 'Value Num'] if c in sep_df.columns]
-
-    table_df = sep_df.copy()
-
-    # Buat kolom tampilan berformat Rupiah (tanpa mengganggu kolom numerik untuk perhitungan)
-    if 'Harga Num' in table_df.columns:
-        table_df['Harga (Rp)'] = table_df['Harga Num'].apply(fmt_rp)
-    if 'Value Total' in table_df.columns:
-        table_df['Value Total (Rp)'] = table_df['Value Total'].apply(fmt_rp)
-    if 'Value Num' in table_df.columns:
-        table_df['Value (Rp)'] = table_df['Value Num'].apply(fmt_rp)
-
-    # Susun kolom tampil: hilangkan kolom mentah angka & teks harga asli
-    cols_show = cols_base + [c for c in ['Harga (Rp)', 'Value Total (Rp)', 'Value (Rp)'] if c in table_df.columns]
-
-    st.dataframe(
-        table_df[cols_show].sort_values('Stock Keluar', ascending=False),
-        use_container_width=True
-    )
-
-# Download cleaned data (tetap berupa data bersih numerik)
+# ==============================
+# Download cleaned data — tombol tema gelap (teks putih)
+# ==============================
 clean_bytes, fname = df_to_excel_download(sep_df)
 st.download_button('⬇️ Download data bersih', data=clean_bytes, file_name=fname, mime='application/octet-stream')
 
-st.caption('© September 2025 Sales Dashboard — built with Streamlit')
+st.caption('© Kajuaruna Dashboard — Powered by Wijaya & Brothers')
