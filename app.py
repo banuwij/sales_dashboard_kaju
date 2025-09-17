@@ -137,7 +137,7 @@ col_up1, col_up2 = st.columns([2,1])
 with col_up1:
     up = st.file_uploader('Upload CSV September 2025', type=['csv'])
 with col_up2:
-    st.write('\\n')
+    st.write('\n')
     use_default = st.checkbox('Pakai path lokal (developer)', value=False)
     local_path = st.text_input('Path lokal', value=DEFAULT_LOCAL_PATH)
 
@@ -193,8 +193,7 @@ with c2:
         tooltip=['Produk', alt.Tooltip('Value Num:Q', format=',')],
         top_n=TOP_N,
         sort_desc=True,
-        format_x=","
-    )
+        format_x=",")
     st.altair_chart(chart_value, use_container_width=True)
 
 # Charts Row 2: Produk Minus & Zero-Keluar
@@ -214,6 +213,19 @@ with m1:
         )
         st.altair_chart(minus_chart, use_container_width=True)
 
+        # Analisa produk minus
+        st.markdown("### Analisa Produk Minus")
+        st.write(f"Total produk minus: **{len(minus_df)}**")
+        st.write("Produk minus biasanya muncul karena:")
+        st.markdown("- Stok keluar lebih besar dari stok masuk (oversold)")
+        st.markdown("- Kesalahan input data stock atau value")
+        st.markdown("- Refund/retur yang belum tercatat di stok masuk")
+        st.write("Top produk minus:")
+        # Format Value Num jadi Rupiah
+minus_df_fmt = minus_df.copy()
+minus_df_fmt['Value (Rp)'] = minus_df_fmt['Value Num'].apply(lambda x: 'Rp' + f"{int(x):,}".replace(',', '.') if pd.notna(x) else x)
+st.dataframe(minus_df_fmt[['Produk','Value (Rp)']].head(min(10, len(minus_df_fmt))))
+
 with m2:
     zero_keluar = sep_df[sep_df['Stock Keluar'] == 0][['Produk']]
     st.subheader('Produk Tidak Keluar (Stock Keluar = 0)')
@@ -225,10 +237,37 @@ with m2:
 if show_tables:
     st.markdown('---')
     st.subheader('Tabel Ringkasan (bersih)')
-    cols_show = [c for c in ['Produk', 'Stock Keluar', 'Stock Masuk', 'Stock Akhir', 'Harga', 'Harga Num', 'Value Total', 'Value Num'] if c in sep_df.columns]
-    st.dataframe(sep_df[cols_show].sort_values('Stock Keluar', ascending=False))
 
-# Download cleaned data
+    def fmt_rp(x):
+        try:
+            x = float(x)
+            return 'Rp' + f"{int(x):,}".replace(',', '.')
+        except Exception:
+            return x
+
+    # Pilih kolom yang relevan
+    cols_base = [c for c in ['Produk', 'Stock Keluar', 'Stock Masuk', 'Stock Akhir'] if c in sep_df.columns]
+    cols_money = [c for c in ['Harga Num', 'Value Total', 'Value Num'] if c in sep_df.columns]
+
+    table_df = sep_df.copy()
+
+    # Buat kolom tampilan berformat Rupiah (tanpa mengganggu kolom numerik untuk perhitungan)
+    if 'Harga Num' in table_df.columns:
+        table_df['Harga (Rp)'] = table_df['Harga Num'].apply(fmt_rp)
+    if 'Value Total' in table_df.columns:
+        table_df['Value Total (Rp)'] = table_df['Value Total'].apply(fmt_rp)
+    if 'Value Num' in table_df.columns:
+        table_df['Value (Rp)'] = table_df['Value Num'].apply(fmt_rp)
+
+    # Susun kolom tampil: hilangkan kolom mentah angka & teks harga asli
+    cols_show = cols_base + [c for c in ['Harga (Rp)', 'Value Total (Rp)', 'Value (Rp)'] if c in table_df.columns]
+
+    st.dataframe(
+        table_df[cols_show].sort_values('Stock Keluar', ascending=False),
+        use_container_width=True
+    )
+
+# Download cleaned data (tetap berupa data bersih numerik)
 clean_bytes, fname = df_to_excel_download(sep_df)
 st.download_button('⬇️ Download data bersih', data=clean_bytes, file_name=fname, mime='application/octet-stream')
 
